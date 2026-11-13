@@ -1,0 +1,4 @@
+# Optional: fast, low-memory CPU inference (llama.cpp). Prebuilt wheels, no compiler needed:
+#   pip install -r requirements-gguf.txt --only-binary=:all:
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+llama-cpp-python>=0.3.2,<0.4

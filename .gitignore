@@ -1,0 +1,12 @@
+# Virtual environment and caches
+.venv/
+__pycache__/
+*.pyc
+
+# Runtime data: models, indexes, uploads, audit log (rebuilt by download_models.py / ingest.py)
+data/
+
+# Secrets
+.env
+*.pem
+*.key

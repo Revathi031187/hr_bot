@@ -1,0 +1,19 @@
+[server]
+# Streamlit's file watcher walks torch.classes and logs noisy errors; hot-reload is not needed in production.
+fileWatcherType = "none"
+headless = true
+maxUploadSize = 25
+
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#1d4ed8"
+backgroundColor = "#f8fafc"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#0f172a"
+font = "sans serif"
