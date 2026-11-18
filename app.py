@@ -10,10 +10,13 @@ import uuid
 import streamlit as st
 
 import audit
+import auth
 import config
 import grounding
+import roles
 from ingest import UPLOAD_TYPES
 from rag_pipeline import HRRagPipeline, IndexNotFoundError, confidence_label
+from styles import CSS, LOGIN_CSS
 
 config.setup_logging()
 log = logging.getLogger("hr_chatbot.app")
@@ -25,133 +28,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-STARTER_PROMPTS = [
-    ("Parental leave", "What is the parental leave duration?"),
-    ("Equipment", "Can I expense a home monitor?"),
-    ("Retirement", "Explain our 401(k) / retirement match"),
-    ("Equity", "How does the stock option vesting schedule work?"),
-    ("Time off", "How many vacation days can I carry over?"),
-    ("Wellbeing", "What is the mental health therapy stipend?"),
-]
 NEW_CATEGORY_HINT = "Or type a new category name"
-
-CSS = """
-<style>
-:root {
-  --ink: #0f172a;
-  --body: #334155;
-  --muted: #64748b;
-  --line: #e2e8f0;
-  --canvas: #f8fafc;
-  --surface: #ffffff;
-  --brand: #1d4ed8;
-  --brand-soft: #eff6ff;
-  --brand-line: #bfdbfe;
-  --good: #047857; --good-bg: #ecfdf5; --good-line: #a7f3d0;
-  --warn: #b45309; --warn-bg: #fffbeb; --warn-line: #fde68a;
-  --bad: #b91c1c;  --bad-bg: #fef2f2;  --bad-line: #fecaca;
-}
-html, body, .stApp, [class*="css"] {
-  font-family: "Inter", "Segoe UI", -apple-system, "Helvetica Neue", Arial, sans-serif;
-  color: var(--body);
-}
-.stApp { background: var(--canvas); }
-#MainMenu, footer, [data-testid="stToolbarActions"], [data-testid="stMainMenu"] { visibility: hidden; }
-header[data-testid="stHeader"] { background: transparent; }
-/* The button that reopens a collapsed sidebar must stay visible. */
-[data-testid="stExpandSidebarButton"], [data-testid="stSidebarCollapseButton"] { visibility: visible !important; }
-[data-testid="stExpandSidebarButton"] { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
-.block-container { padding-top: 2.6rem; padding-bottom: 6rem; max-width: 920px; }
-
-/* ---- Page header ---- */
-.page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px;
-  padding-bottom: 14px; margin-bottom: 18px; border-bottom: 1px solid var(--line); }
-.eyebrow { font-size: 0.72rem; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--brand); }
-.page-head h1 { font-size: 1.65rem; line-height: 1.2; font-weight: 700; color: var(--ink); margin: 2px 0 4px 0; padding: 0; }
-.page-head p { margin: 0; color: var(--muted); font-size: 0.93rem; }
-.scope-pill { font-size: 0.78rem; font-weight: 600; color: var(--brand); background: var(--brand-soft);
-  border: 1px solid var(--brand-line); border-radius: 999px; padding: 5px 12px; white-space: nowrap; }
-
-/* ---- Sidebar ---- */
-section[data-testid="stSidebar"] { background: var(--surface); border-right: 1px solid var(--line); }
-section[data-testid="stSidebar"] .block-container { padding-top: 1.6rem; }
-.brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
-.brand-mark { width: 34px; height: 34px; border-radius: 9px; background: var(--brand); color: #fff;
-  display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.95rem; }
-.brand-name { font-weight: 700; color: var(--ink); font-size: 1rem; line-height: 1.1; }
-.brand-sub { color: var(--muted); font-size: 0.78rem; }
-.side-title { font-size: 0.7rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
-  color: var(--muted); margin: 22px 0 8px 0; }
-.status-list { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
-.status-row { display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  padding: 9px 12px; font-size: 0.83rem; color: var(--ink); }
-.status-row + .status-row { border-top: 1px solid var(--line); }
-.status-row .val { color: var(--muted); font-size: 0.76rem; text-align: right; }
-.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; }
-.dot.on { background: #10b981; } .dot.idle { background: #f59e0b; } .dot.off { background: #ef4444; }
-.dot.busy { background: #3b82f6; animation: pulse 1.2s ease-in-out infinite; }
-@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
-.side-note { color: var(--muted); font-size: 0.76rem; margin-top: 6px; }
-.upload-item { font-size: 0.82rem; color: var(--ink); font-weight: 600; line-height: 1.25; }
-.upload-item span { display: block; color: var(--muted); font-weight: 400; font-size: 0.74rem; }
-
-/* ---- Banners ---- */
-.banner { border-radius: 10px; padding: 10px 14px; font-size: 0.86rem; margin-bottom: 14px; border: 1px solid; }
-.banner.info { background: var(--brand-soft); border-color: var(--brand-line); color: #1e3a8a; }
-.banner.error { background: var(--bad-bg); border-color: var(--bad-line); color: var(--bad); }
-
-/* ---- Empty state ---- */
-.welcome { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 22px 24px; margin-bottom: 14px; }
-.welcome h3 { margin: 0 0 6px 0; color: var(--ink); font-size: 1.05rem; font-weight: 700; }
-.welcome p { margin: 0; color: var(--muted); font-size: 0.9rem; line-height: 1.55; }
-.st-key-starters .stButton > button {
-  width: 100%; height: 100%; min-height: 64px; text-align: left; justify-content: flex-start;
-  border-radius: 12px; border: 1px solid var(--line); background: var(--surface); color: var(--ink);
-  padding: 12px 14px; font-weight: 500; box-shadow: none; transition: border-color .15s, box-shadow .15s;
-}
-.st-key-starters [data-testid="stHorizontalBlock"] { align-items: stretch; }
-.st-key-starters [data-testid="stColumn"] > div, .st-key-starters .stButton { height: 100%; }
-.st-key-starters .stButton > button > div { width: 100%; justify-content: flex-start; text-align: left; }
-.st-key-starters .stButton > button [data-testid="stMarkdownContainer"] { width: 100%; text-align: left; }
-.st-key-starters .stButton > button p { white-space: normal; text-align: left; margin: 0; line-height: 1.4; font-size: 0.88rem; }
-.st-key-starters .stButton > button p:first-child { font-size: 0.7rem; font-weight: 700; letter-spacing: 0.08em;
-  text-transform: uppercase; color: var(--brand); margin-bottom: 4px; }
-.st-key-starters .stButton > button:hover { border-color: var(--brand); box-shadow: 0 2px 8px rgba(29,78,216,.10); color: var(--brand); }
-.starter-label { font-size: 0.68rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin: 4px 0 -4px 2px; }
-
-/* ---- Chat ---- */
-[data-testid="stChatMessage"] { background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
-  padding: 14px 18px; margin-bottom: 10px; box-shadow: 0 1px 2px rgba(15,23,42,.04); }
-[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) { background: var(--brand-soft); border-color: var(--brand-line); }
-[data-testid="stChatInput"] { border-radius: 14px; }
-.meta-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 8px 0; }
-.tag { display: inline-block; padding: 2px 9px; border-radius: 6px; font-size: 0.72rem; font-weight: 600; border: 1px solid transparent; }
-.tag.neutral { background: #f1f5f9; color: var(--body); border-color: var(--line); }
-.tag.brand { background: var(--brand-soft); color: var(--brand); border-color: var(--brand-line); }
-.tag.high { background: var(--good-bg); color: var(--good); border-color: var(--good-line); }
-.tag.medium { background: var(--warn-bg); color: var(--warn); border-color: var(--warn-line); }
-.tag.warn { background: var(--warn-bg); color: var(--warn); border-color: var(--warn-line); }
-.tag.good { background: var(--good-bg); color: var(--good); border-color: var(--good-line); }
-.tag.bad { background: var(--bad-bg); color: var(--bad); border-color: var(--bad-line); }
-.tag.low { background: var(--bad-bg); color: var(--bad); border-color: var(--bad-line); }
-
-/* ---- Source cards ---- */
-.source-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 11px 14px; margin: 8px 0; }
-.source-card[open] { border-color: var(--brand-line); }
-.source-card summary { cursor: pointer; list-style: none; font-weight: 600; font-size: 0.9rem; color: var(--ink); }
-.source-card summary::-webkit-details-marker { display: none; }
-.source-card .sub { color: var(--muted); font-weight: 400; font-size: 0.78rem; margin-top: 3px; }
-.source-card .scores { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 8px 0; }
-.source-card .chunk { background: var(--canvas); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
-  font-size: 0.83rem; line-height: 1.55; color: var(--body); }
-.bar { height: 4px; background: var(--line); border-radius: 4px; overflow: hidden; margin-top: 9px; }
-.bar > div { height: 100%; background: var(--brand); }
-
-/* ---- Buttons ---- */
-section[data-testid="stSidebar"] .stButton > button, section[data-testid="stSidebar"] [data-testid="stFormSubmitButton"] > button {
-  border-radius: 8px; font-weight: 600; font-size: 0.84rem; }
-</style>
-"""
+ADMIN_VIEWS = ["Assistant", "Knowledge base", "System", "Users"]
 
 
 # --------------------------------------------------------------------------- resources
@@ -165,6 +43,9 @@ def init_state() -> None:
     st.session_state.setdefault("pending_prompt", None)
     st.session_state.setdefault("flash", [])
     st.session_state.setdefault("session_id", uuid.uuid4().hex[:8])
+    st.session_state.setdefault("user", None)
+    st.session_state.setdefault("login_error", "")
+    st.session_state.setdefault("admin_view", ADMIN_VIEWS[0])
 
 
 def queue_prompt(prompt: str) -> None:
@@ -176,10 +57,145 @@ def clear_history() -> None:
     st.session_state.pending_prompt = None
 
 
+def sid() -> str:
+    return st.session_state.get("session_id", "")
+
+
+def actor(user: dict | None = None) -> dict:
+    """Who is acting, for the audit log (display name, not the email, which the log would mask)."""
+    user = user or st.session_state.get("user") or {}
+    return {"user": user.get("name", ""), "role": user.get("role", "")}
+
+
+def initials(name: str) -> str:
+    parts = [p for p in name.replace(".", " ").split() if p]
+    return "".join(p[0] for p in parts[:2]).upper() or "?"
+
+
+def role_badge(role: str) -> str:
+    return f'<span class="role-badge {html.escape(role)}">{html.escape(roles.get_role(role).label)}</span>'
+
+
+# --------------------------------------------------------------------------- sign in / sign up
+def start_session(user: dict, event: str) -> None:
+    st.session_state.user = user
+    st.session_state.messages = []
+    st.session_state.pending_prompt = None
+    st.session_state.admin_view = ADMIN_VIEWS[0]
+    st.session_state.login_error = ""
+    audit.record(event, sid(), **actor(user))
+
+
+def do_login(email: str, password: str = "", trusted: bool = False) -> None:
+    """Callback for the sign-in form and the demo shortcuts; failures are shown on the login page."""
+    try:
+        start_session(auth.authenticate(email, password, trusted=trusted), "login")
+    except auth.AuthError as exc:
+        st.session_state.login_error = str(exc)
+
+
+def do_logout() -> None:
+    audit.record("logout", sid(), **actor())
+    for key in ("user", "messages", "pending_prompt", "flash", "login_error", "admin_view", "session_id", "auth_mode", "login_notice"):
+        st.session_state.pop(key, None)
+    init_state()
+
+
+def resolve_user() -> dict | None:
+    """The signed-in user, re-read from the store so a role change by an admin applies on the next action."""
+    session_user = st.session_state.get("user")
+    if not session_user:
+        return None
+    fresh = auth.get_user(session_user["email"])
+    if fresh is None:
+        do_logout()
+        return None
+    st.session_state.user = fresh
+    return fresh
+
+
+def set_auth_mode(mode: str) -> None:
+    st.session_state.auth_mode = mode
+    st.session_state.login_error = ""
+
+
+def render_login() -> None:
+    st.markdown(LOGIN_CSS, unsafe_allow_html=True)
+    auth.ensure_demo_users()
+    mode = st.session_state.get("auth_mode", "signin")
+    left, right = st.columns(2, gap="small")
+
+    with left, st.container(key="auth_brand"):
+        st.markdown(
+            f'<div class="auth-logo"><div class="mark">{html.escape(config.COMPANY_NAME[:1])}</div>'
+            f'<div class="name">{html.escape(config.COMPANY_NAME)}</div>'
+            '<div class="sub">HR Policy Assistant</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    with right, st.container(key="auth_card"):
+        if mode == "signin":
+            st.markdown('<div class="auth-title">Sign in</div>', unsafe_allow_html=True)
+            if notice := st.session_state.pop("login_notice", ""):
+                st.success(notice, icon="✅")
+            if st.session_state.login_error:
+                st.error(st.session_state.login_error, icon="⚠️")
+                st.session_state.login_error = ""
+            with st.form("login_form", border=False):
+                email = st.text_input(
+                    "Work email", placeholder="name@meridianlabs.example", key="login_email",
+                    value=st.session_state.pop("prefill_email", ""),
+                )
+                password = st.text_input("Password", type="password", key="login_password")
+                submitted = st.form_submit_button("Sign in", type="primary", width="stretch")
+            if submitted:
+                do_login(email, password)
+                st.rerun()
+            st.button("New here? Create an account", key="to_signup", on_click=set_auth_mode, args=("signup",), type="tertiary")
+
+            demo = auth.demo_accounts()
+            if demo:
+                st.markdown('<div class="demo-head">Demo accounts</div>', unsafe_allow_html=True)
+                with st.container(key="demo_grid"):
+                    columns = st.columns(2)
+                    for index, account in enumerate(demo):
+                        with columns[index % 2]:
+                            st.button(
+                                f"{account['name'].split()[0]} · {roles.get_role(account['role']).label}",
+                                key=f"demo_{account['email']}",
+                                on_click=do_login,
+                                args=(account["email"], "", True),
+                                width="stretch",
+                            )
+        else:
+            st.markdown('<div class="auth-title">Create account</div>', unsafe_allow_html=True)
+            with st.form("signup_form", border=False):
+                name = st.text_input("Full name", key="signup_name")
+                new_email = st.text_input("Work email", placeholder="name@meridianlabs.example", key="signup_email")
+                new_password = st.text_input(
+                    "Password", type="password", help="At least 8 characters, with a letter and a number.", key="signup_password"
+                )
+                confirm = st.text_input("Confirm password", type="password", key="signup_confirm")
+                created = st.form_submit_button("Create account", type="primary", width="stretch")
+            if created:
+                try:
+                    user = auth.register(name, new_email, new_password, confirm)
+                except auth.AuthError as exc:
+                    st.error(str(exc), icon="⚠️")
+                else:
+                    audit.record("signup", sid(), **actor(user))
+                    st.session_state.login_notice = "Account created. Sign in to continue."
+                    st.session_state.prefill_email = user["email"]
+                    st.session_state.auth_mode = "signin"
+                    st.rerun()
+            st.button("Already have an account? Sign in", key="to_signin", on_click=set_auth_mode, args=("signin",), type="tertiary")
+
+
 def remove_upload(pipeline: HRRagPipeline, document_id: str) -> None:
     try:
-        pipeline.remove_uploaded_document(document_id)
-        audit.record("document_removed", st.session_state.get("session_id", ""), document_id=document_id)
+        role = (st.session_state.get("user") or {}).get("role")
+        pipeline.remove_uploaded_document(document_id, role=role)
+        audit.record("document_removed", sid(), document_id=document_id, **actor())
         st.session_state.flash = [("ok", "Document removed from the knowledge base.")]
     except Exception as exc:
         st.session_state.flash = [("error", f"Could not remove the document: {exc}")]
@@ -242,17 +258,18 @@ def show_flash() -> None:
     st.session_state.flash = []
 
 
-def handle_upload(pipeline: HRRagPipeline, files, category: str) -> None:
+def handle_upload(pipeline: HRRagPipeline, files, category: str, role: str | None) -> None:
     results = []
     with st.spinner("Reading, chunking and embedding..."):
         for file in files:
             try:
-                info = pipeline.add_uploaded_document(file.name, file.getvalue(), category)
+                info = pipeline.add_uploaded_document(file.name, file.getvalue(), category, role=role)
                 results.append(("ok", f"{file.name}: {info['chunks']} chunks added to “{info['category']}”."))
                 results.extend(("warn", f"{file.name}: {warning}") for warning in info["warnings"])
                 audit.record(
                     "document_added",
-                    st.session_state.get("session_id", ""),
+                    sid(),
+                    **actor(),
                     filename=file.name,
                     document_id=info["document_id"],
                     category=info["category"],
@@ -262,51 +279,136 @@ def handle_upload(pipeline: HRRagPipeline, files, category: str) -> None:
                 )
             except Exception as exc:
                 results.append(("error", f"{file.name}: {exc}"))
-                audit.record("document_rejected", st.session_state.get("session_id", ""), filename=file.name, reason=str(exc))
+                audit.record("document_rejected", sid(), **actor(), filename=file.name, reason=str(exc))
     st.session_state.flash = results
     st.rerun()
 
 
-def render_knowledge_base(pipeline: HRRagPipeline) -> None:
-    st.markdown('<div class="side-title">Knowledge base</div>', unsafe_allow_html=True)
-    show_flash()
+def kpi_grid(items: list[tuple[str, str, str]]) -> None:
+    cells = "".join(
+        f'<div class="kpi"><div class="label">{html.escape(label)}</div><div class="value">{html.escape(value)}</div>'
+        f'<div class="hint">{html.escape(hint)}</div></div>'
+        for label, value, hint in items
+    )
+    st.markdown(f'<div class="kpi-grid">{cells}</div>', unsafe_allow_html=True)
 
-    options = sorted({*pipeline.categories, config.DEFAULT_UPLOAD_CATEGORY})
-    with st.form("upload_form", clear_on_submit=True, border=False):
-        files = st.file_uploader(
-            "Add documents",
-            type=UPLOAD_TYPES,
-            accept_multiple_files=True,
-            help="PDF, DOCX, TXT, Markdown or images (PNG, JPG: text is read with OCR). Files are split into chunks and stored in ChromaDB so you can ask about them.",
-        )
-        chosen = st.selectbox("Category", options, index=options.index(config.DEFAULT_UPLOAD_CATEGORY))
-        new_category = st.text_input("New category", placeholder=NEW_CATEGORY_HINT, label_visibility="collapsed")
-        submitted = st.form_submit_button("Add to knowledge base", width="stretch", type="primary")
-    if submitted:
-        if files:
-            handle_upload(pipeline, files, new_category.strip() or chosen)
-        else:
-            st.warning("Choose at least one file first.")
 
+def render_knowledge_base(pipeline: HRRagPipeline, user: dict) -> None:
+    """Administrator view: index size, per-category breakdown, and document upload/removal."""
+    s = pipeline.status()
     uploads = pipeline.list_uploads()
-    if uploads:
-        with st.expander(f"Uploaded documents ({len(uploads)})"):
-            for item in uploads:
-                left, right = st.columns([4, 2], vertical_alignment="center")
-                left.markdown(
-                    f'<div class="upload-item">{html.escape(item["title"])}'
-                    f'<span>{html.escape(item["category"])} · {item["chunks"]} chunks</span></div>',
-                    unsafe_allow_html=True,
-                )
-                if item.get("warnings"):
-                    left.caption("⚠️ " + item["warnings"].replace(" | ", "\n\n⚠️ "))
-                right.button("Remove", key=f"rm_{item['document_id']}", on_click=remove_upload,
-                             args=(pipeline, item["document_id"]), width="stretch")
+    kpi_grid(
+        [
+            ("Documents", f"{s['documents']:,}", f"{len(uploads)} uploaded by admins"),
+            ("Vector chunks", f"{s['vector_chunks']:,}", "stored in ChromaDB"),
+            ("Keyword chunks", f"{s['bm25_chunks']:,}", "in the BM25 index"),
+            ("Categories", f"{len(s['categories'])}", "policy groups"),
+        ]
+    )
+    if s["vector_chunks"] != s["bm25_chunks"]:
+        st.warning("The vector and keyword indexes differ in size. Run `python ingest.py` to rebuild them.", icon="⚠️")
+    if s["index_stale"]:
+        st.info("The source documents changed after the last ingestion. Run `python ingest.py`, then restart the app.", icon="ℹ️")
+
+    left, right = st.columns([1.15, 1], gap="large")
+    with left, st.container(key="kb_upload"):
+        st.markdown('<div class="panel-title">Add documents</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="panel-sub">PDF, DOCX, TXT, Markdown or images (read with OCR). Files are split into chunks and are searchable straight away.</div>',
+            unsafe_allow_html=True,
+        )
+        show_flash()
+        options = sorted({*pipeline.categories, config.DEFAULT_UPLOAD_CATEGORY})
+        with st.form("upload_form", clear_on_submit=True, border=False):
+            files = st.file_uploader("Files", type=UPLOAD_TYPES, accept_multiple_files=True)
+            chosen = st.selectbox("Category", options, index=options.index(config.DEFAULT_UPLOAD_CATEGORY))
+            new_category = st.text_input("New category", placeholder=NEW_CATEGORY_HINT, label_visibility="collapsed")
+            submitted = st.form_submit_button("Add to knowledge base", width="stretch", type="primary")
+        if submitted:
+            if files:
+                handle_upload(pipeline, files, new_category.strip() or chosen, user["role"])
+            else:
+                st.warning("Choose at least one file first.")
+
+    with right:
+        st.markdown('<div class="panel-title">Coverage by category</div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel-sub">Documents and chunks currently indexed.</div>', unsafe_allow_html=True)
+        st.dataframe(
+            pipeline.category_stats(),
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Category": st.column_config.TextColumn(width="medium"),
+                "Documents": st.column_config.NumberColumn(width="small"),
+                "Chunks": st.column_config.NumberColumn(width="small"),
+            },
+        )
+
+    st.markdown('<div class="panel-title">Uploaded documents</div>', unsafe_allow_html=True)
+    if not uploads:
+        st.caption("Nothing has been uploaded yet. The built-in policy corpus cannot be removed here.")
+    for item in uploads:
+        left, right = st.columns([5, 1], vertical_alignment="center")
+        left.markdown(
+            f'<div class="upload-item">{html.escape(item["title"])}'
+            f'<span>{html.escape(item["category"])} · {item["chunks"]} chunks</span></div>',
+            unsafe_allow_html=True,
+        )
+        if item.get("warnings"):
+            left.caption("⚠️ " + item["warnings"].replace(" | ", "\n\n⚠️ "))
+        right.button(
+            "Remove", key=f"rm_{item['document_id']}", on_click=remove_upload, args=(pipeline, item["document_id"]), width="stretch"
+        )
+
+
+def render_system(pipeline: HRRagPipeline) -> None:
+    """Administrator view: live component status, an explanation of the pipeline, and the audit log."""
+    with st.container(key="admin_panel"):
+        st.markdown('<div class="panel-title">Component status</div>', unsafe_allow_html=True)
+        status_panel(pipeline)
+    st.markdown('<div class="panel-title" style="margin-top:18px">Pipeline reference</div>', unsafe_allow_html=True)
+    render_how_it_works(pipeline)
+    st.markdown('<div class="panel-title" style="margin-top:18px">Activity</div>', unsafe_allow_html=True)
+    render_audit_log()
+
+
+def render_users(user: dict) -> None:
+    """Administrator view: list accounts and change roles."""
+    accounts = auth.list_users()
+    counts = {key: sum(1 for a in accounts if a["role"] == key) for key in roles.ROLES}
+    kpi_grid([(roles.ROLES[key].label, str(counts[key]), "accounts") for key in roles.ROLES])
+
+    with st.container(key="user_admin"):
+        show_flash()
+        st.markdown('<div class="panel-title">Accounts</div>', unsafe_allow_html=True)
+        st.dataframe(
+            [
+                {"Name": a["name"], "Email": a["email"], "Title": a["title"], "Role": roles.get_role(a["role"]).label}
+                for a in accounts
+            ],
+            hide_index=True,
+            width="stretch",
+        )
+        st.markdown('<div class="panel-title" style="margin-top:14px">Change a role</div>', unsafe_allow_html=True)
+        by_email = {a["email"]: a for a in accounts}
+        with st.form("role_form", border=False):
+            col_user, col_role = st.columns(2)
+            target = col_user.selectbox("User", list(by_email), format_func=lambda e: f"{by_email[e]['name']} ({e})")
+            new_role = col_role.selectbox("Role", list(roles.ROLES), format_func=lambda r: roles.ROLES[r].label, index=list(roles.ROLES).index(roles.EMPLOYEE))
+            saved = st.form_submit_button("Save role", type="primary")
+        if saved:
+            try:
+                updated = auth.set_role(user["role"], target, new_role)
+            except (auth.AuthError, PermissionError) as exc:
+                st.error(str(exc), icon="⚠️")
+            else:
+                audit.record("role_changed", sid(), **actor(), target=updated["name"], new_role=updated["role"])
+                st.session_state.flash = [("ok", f"{updated['name']} is now {roles.get_role(updated['role']).label}.")]
+                st.rerun()
 
 
 def render_how_it_works(pipeline: HRRagPipeline) -> None:
     s = pipeline.status()
-    st.markdown('<div class="side-title">How it works</div>', unsafe_allow_html=True)
     with st.expander("Models, chunking and search"):
         st.markdown(
             f"""
@@ -372,6 +474,8 @@ def render_audit_log() -> None:
         rows = [
             {
                 "Time (UTC)": e["ts"].replace("T", " ").removesuffix("+00:00"),
+                "User": e.get("user", ""),
+                "Role": roles.get_role(e["role"]).label if e.get("role") else "",
                 "Event": e["event"].replace("_", " "),
                 "Detail": (e.get("question") or e.get("filename") or e.get("document_id") or "")[:70],
                 "Outcome": e.get("outcome") or ("; ".join(e.get("warnings", []))[:50] if e.get("warnings") else ""),
@@ -387,7 +491,20 @@ def render_audit_log() -> None:
             )
 
 
-def render_sidebar(pipeline: HRRagPipeline) -> tuple[str | None, int]:
+def render_profile_menu(user: dict) -> None:
+    """Collapsible account menu fixed to the top-right corner of the page."""
+    with st.container(key="profile_menu"):
+        with st.popover(user["name"], icon=":material/account_circle:"):
+            st.markdown(
+                f'<div class="profile"><div class="avatar {html.escape(user["role"])}">{html.escape(initials(user["name"]))}</div>'
+                f'<div class="who"><div class="name">{html.escape(user["name"])}</div>'
+                f'<div class="title">{html.escape(user["title"])}</div>{role_badge(user["role"])}</div></div>',
+                unsafe_allow_html=True,
+            )
+            st.button("Sign out", on_click=do_logout, width="stretch", type="primary", key="sign_out")
+
+
+def render_sidebar(pipeline: HRRagPipeline, user: dict) -> tuple[str | None, int, str]:
     with st.sidebar:
         st.markdown(
             f'<div class="brand"><div class="brand-mark">{html.escape(config.COMPANY_NAME[:1])}</div>'
@@ -396,16 +513,18 @@ def render_sidebar(pipeline: HRRagPipeline) -> tuple[str | None, int]:
             unsafe_allow_html=True,
         )
 
-        st.markdown('<div class="side-title">System</div>', unsafe_allow_html=True)
-        status_panel(pipeline)
+        view = ADMIN_VIEWS[0]
+        if roles.can(user["role"], roles.MANAGE_KB):
+            st.markdown('<div class="side-title">Navigate</div>', unsafe_allow_html=True)
+            view = st.radio("View", ADMIN_VIEWS, key="admin_view", label_visibility="collapsed")
 
-        st.markdown('<div class="side-title">Search scope</div>', unsafe_allow_html=True)
-        choice = st.selectbox("Category", ["All categories", *pipeline.categories], label_visibility="collapsed")
-        top_k = st.slider("Passages per answer", 2, 8, config.DEFAULT_TOP_K, help="How many policy passages are given to the model.")
-
-        render_knowledge_base(pipeline)
-        render_how_it_works(pipeline)
-        render_audit_log()
+        choice, top_k = "All categories", config.DEFAULT_TOP_K
+        if view == ADMIN_VIEWS[0]:
+            st.markdown('<div class="side-title">Search settings</div>', unsafe_allow_html=True)
+            choice = st.selectbox("Category", ["All categories", *pipeline.categories], help="Limit answers to one policy category.")
+            top_k = st.slider(
+                "Passages per answer", 2, 8, config.DEFAULT_TOP_K, help="How many policy passages are given to the model. More gives more context but a slower answer."
+            )
 
         st.markdown('<div class="side-title">Conversation</div>', unsafe_allow_html=True)
         st.button("Clear history", on_click=clear_history, width="stretch")
@@ -414,7 +533,7 @@ def render_sidebar(pipeline: HRRagPipeline) -> tuple[str | None, int]:
             "Answers summarise policy and are not legal or medical advice.</div>",
             unsafe_allow_html=True,
         )
-    return (None if choice == "All categories" else choice), top_k
+    return (None if choice == "All categories" else choice), top_k, view
 
 
 # --------------------------------------------------------------------------- main area
@@ -486,14 +605,20 @@ def render_sources(message: dict) -> None:
         st.markdown("".join(cards), unsafe_allow_html=True)
 
 
-def render_header(category: str | None) -> None:
+def render_header(category: str | None, view: str = "Assistant") -> None:
     scope = category or "All categories"
+    titles = {
+        "Assistant": (f"{config.COMPANY_NAME} HR Assistant", "Answers about leave, benefits, remote work, pay and conduct, with the source policy cited."),
+        "Knowledge base": ("Knowledge base", "Add policy documents and check what the assistant can search."),
+        "System": ("System", "Component health, how the pipeline works, and the activity log."),
+        "Users": ("Users and roles", "Review accounts and decide what each person can see."),
+    }
+    title, subtitle = titles.get(view, titles["Assistant"])
+    pill = f'<div class="scope-pill">Scope: {html.escape(scope)}</div>' if view == "Assistant" else ""
     st.markdown(
         '<div class="page-head"><div>'
-        '<div class="eyebrow">Policy assistant</div>'
-        f"<h1>{html.escape(config.COMPANY_NAME)} HR Assistant</h1>"
-        "<p>Answers about leave, benefits, remote work, pay and conduct, with the source policy cited.</p></div>"
-        f'<div class="scope-pill">Scope: {html.escape(scope)}</div></div>',
+        f'<div class="eyebrow">{"Policy assistant" if view == "Assistant" else "Administration"}</div>'
+        f"<h1>{html.escape(title)}</h1><p>{html.escape(subtitle)}</p></div>{pill}</div>",
         unsafe_allow_html=True,
     )
 
@@ -506,25 +631,27 @@ def render_history() -> None:
                 render_sources(message)
 
 
-def render_empty_state(pipeline: HRRagPipeline) -> None:
+def render_empty_state(pipeline: HRRagPipeline, user: dict) -> None:
+    role = roles.get_role(user["role"])
+    first_name = user["name"].split()[0]
     n_categories = len(pipeline.categories)
     st.markdown(
-        '<div class="welcome"><h3>How can I help?</h3>'
-        f"<p>I search {n_categories} policy categories and any documents you upload, then answer using only what those "
-        "documents say. Pick a topic below or type your own question.</p></div>"
-        '<div class="starter-label">Suggested questions</div>',
+        f'<div class="welcome"><div class="hello"><h3>Hello, {html.escape(first_name)}. How can I help?</h3>{role_badge(role.key)}</div>'
+        f"<p>{html.escape(role.welcome)} I search {n_categories} policy categories and any documents your administrator "
+        "has added, then answer using only what those documents say.</p></div>"
+        '<div class="starter-label">Suggested for you</div>',
         unsafe_allow_html=True,
     )
     with st.container(key="starters"):
         columns = st.columns(3)
-        for index, (topic, prompt) in enumerate(STARTER_PROMPTS):
+        for index, (topic, prompt) in enumerate(role.starters):
             columns[index % 3].button(
                 f"{topic}\n\n{prompt}", width="stretch", key=f"starter_{index}", on_click=queue_prompt, args=(prompt,)
             )
 
 
 # --------------------------------------------------------------------------- chat turn
-def answer_question(pipeline: HRRagPipeline, prompt: str, category: str | None, top_k: int) -> None:
+def answer_question(pipeline: HRRagPipeline, prompt: str, category: str | None, top_k: int, user: dict) -> None:
     history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -543,13 +670,13 @@ def answer_question(pipeline: HRRagPipeline, prompt: str, category: str | None, 
             generation_latency = time.perf_counter() - started
         except Exception as exc:  # surface model/network failures in the UI instead of a stack trace
             log.exception("Answering failed")
-            audit.record("error", st.session_state.get("session_id", ""), question=prompt, error=f"{type(exc).__name__}: {exc}")
+            audit.record("error", sid(), **actor(user), question=prompt, error=f"{type(exc).__name__}: {exc}")
             st.error(f"Something went wrong while answering: {type(exc).__name__}: {exc or 'no details, see the terminal log'}")
             st.session_state.messages.pop()
             return
 
         audit.query_event(
-            st.session_state.get("session_id", ""), prompt, answer.replace("\\$", "$"), retrieval, generation_latency, retrieval.grounding
+            sid(), prompt, answer.replace("\\$", "$"), retrieval, generation_latency, retrieval.grounding, **actor(user)
         )
         message = {
             "role": "assistant",
@@ -564,10 +691,30 @@ def answer_question(pipeline: HRRagPipeline, prompt: str, category: str | None, 
     st.session_state.messages.append(message)
 
 
+def render_assistant(pipeline: HRRagPipeline, user: dict, category: str | None, top_k: int) -> None:
+    model_banner(pipeline)
+
+    pending = st.session_state.pending_prompt
+    st.session_state.pending_prompt = None
+
+    render_history()
+    if not st.session_state.messages and not pending:
+        render_empty_state(pipeline, user)
+
+    prompt = st.chat_input("Ask an HR policy question...") or pending
+    if prompt:
+        answer_question(pipeline, prompt, category, top_k, user)
+
+
 # --------------------------------------------------------------------------- main
 def main() -> None:
-    st.markdown(CSS, unsafe_allow_html=True)
     init_state()
+    st.markdown(CSS, unsafe_allow_html=True)
+
+    user = resolve_user()
+    if user is None:
+        render_login()
+        return
 
     try:
         pipeline = load_pipeline()
@@ -577,21 +724,19 @@ def main() -> None:
         st.stop()
 
     pipeline.start_background_load()  # no-op after the first call; keeps the UI responsive
-    category, top_k = render_sidebar(pipeline)
+    render_profile_menu(user)
+    category, top_k, view = render_sidebar(pipeline, user)
 
-    render_header(category)
-    model_banner(pipeline)
+    render_header(category, view)
+    if view == "Knowledge base":
+        render_knowledge_base(pipeline, user)
+    elif view == "System":
+        render_system(pipeline)
+    elif view == "Users":
+        render_users(user)
+    else:
+        render_assistant(pipeline, user, category, top_k)
 
-    pending = st.session_state.pending_prompt
-    st.session_state.pending_prompt = None
-
-    render_history()
-    if not st.session_state.messages and not pending:
-        render_empty_state(pipeline)
-
-    prompt = st.chat_input("Ask an HR policy question...") or pending
-    if prompt:
-        answer_question(pipeline, prompt, category, top_k)
 
 
 main()

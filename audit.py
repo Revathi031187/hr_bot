@@ -61,11 +61,14 @@ def record(event: str, session_id: str = "", **fields) -> None:
         log.exception("Could not write the audit log")
 
 
-def query_event(session_id: str, question: str, answer: str, retrieval, generation_latency: float, grounding: dict | None) -> None:
-    """Log one answered question with the passages that were used."""
+def query_event(
+    session_id: str, question: str, answer: str, retrieval, generation_latency: float, grounding: dict | None, **actor
+) -> None:
+    """Log one answered question with the passages that were used. ``actor`` is the user and role asking."""
     record(
         "question",
         session_id,
+        **actor,
         question=question,
         standalone_question=retrieval.standalone_question if retrieval.standalone_question != question else "",
         answer=answer,

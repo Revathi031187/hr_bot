@@ -10,7 +10,7 @@ Streamlit portal that shows exactly which policy each answer came from.
 - **Reranker:** `cross-encoder/ms-marco-MiniLM-L-6-v2` (CPU, optional)
 - **Vector store:** ChromaDB, persisted in `./data/chroma_db`
 - **Keyword index:** BM25 pickled to `./data/bm25_index.pkl`
-- **UI:** Streamlit with streamed answers, source cards, confidence and grounding tags, chat memory
+- **UI:** Streamlit with sign-in, role-based views, streamed answers, source cards, confidence and grounding tags, chat memory
 
 > For how the system works internally (ingestion, retrieval maths, prompts, safety layers, design decisions) read
 > **[docs/TECHNICAL_DOCUMENT.md](docs/TECHNICAL_DOCUMENT.md)**.
@@ -128,8 +128,8 @@ streamlit run app.py
 ```
 
 Open <http://localhost:8501> (Streamlit prints the URL; `headless = true` means the browser is not opened for you).
-Try: *How many vacation days can I carry over?* The model finishes loading in the background, so the very first
-answer can take a little longer.
+You land on the sign-in page: press **Arjun · Employee** (or any demo user, see [section 2](#2-signing-in-and-roles)), then try
+*How many vacation days can I carry over?* The model finishes loading in the background, so the very first answer can take a little longer.
 
 Stop the server with `Ctrl+C`.
 
@@ -182,7 +182,28 @@ streamlit run app.py
 
 ---
 
-## 2. Quick start on macOS / Linux
+## 2. Signing in and roles
+
+The app opens on a full-screen **sign-in page**. Choose *Create an account* to register (every new account is an **Employee**); after registering you are sent back to *Sign in* with your email filled in, and you must sign in with your new password. The
+four demo buttons (for example *Arjun · Employee*) log you in with one click.
+
+| Role | Demo user | Email | What they see |
+|---|---|---|---|
+| Administrator | Priya Raman, HR Operations Administrator | `priya.raman@meridianlabs.example` | The assistant **plus** Knowledge base (upload/remove documents, chunk counts, coverage by category), System (component status, pipeline reference, audit log) and Users (change roles) |
+| Director | Daniel Whitfield, Director of Engineering | `daniel.whitfield@meridianlabs.example` | The assistant, with suggested questions about pay, performance, promotion, discipline and complaints |
+| Senior employee | Meera Iyer, Senior Software Engineer | `meera.iyer@meridianlabs.example` | The assistant, with suggested questions about reviews, promotion, hybrid work, security and ethics |
+| Employee | Arjun Kapoor, Software Engineer | `arjun.kapoor@meridianlabs.example` | The assistant, with suggested questions about leave, benefits, equipment and retirement |
+
+- **Demo password:** `Welcome@2026` for all four accounts. It is for evaluation only; change it with `HR_DEMO_PASSWORD` before the first start,
+  or turn the demo accounts off with `HR_DEMO_ACCOUNTS=0`.
+- Only the Administrator can ingest documents, see chunk counts or the audit log, and change roles. The restriction is enforced in the
+  pipeline as well as in the interface, so it cannot be bypassed by hiding or showing buttons.
+- Accounts are stored in `data\users.json` (salted PBKDF2 password hashes). Five failed sign-ins lock an address for five minutes.
+- To make someone an administrator, sign in as an Administrator, open **Users**, choose the person and a role, and press *Save role*.
+  The change applies on that person's next action.
+- This login is meant for a single local deployment. For company-wide use, place the app behind your single sign-on and map groups to roles.
+
+## 3. Quick start on macOS / Linux
 
 ```bash
 ./run.sh
@@ -200,7 +221,7 @@ streamlit run app.py
 
 ---
 
-## 3. Architecture
+## 4. Architecture
 
 ```
                          ┌─────────────────────────── ingest.py (run once) ───────────────────────────┐
@@ -230,7 +251,7 @@ Behaviour worth knowing:
 - Sensitive legal or medical wording in the question appends a fixed HR disclaimer in code, so it cannot be skipped by the model.
 - The confidence tag is a heuristic on the hybrid score: `0.6 × cosine similarity + 0.4 × BM25/(BM25+4)`, bucketed as High (≥ 0.62), Medium (≥ 0.50) or Low.
 
-## 4. Directory tree
+## 5. Directory tree
 
 ```
 hr-chatbot/
@@ -238,6 +259,9 @@ hr-chatbot/
 ├── rag_pipeline.py        Retrieval, prompts, LLM loading, streaming
 ├── ingest.py              Parse -> chunk -> embed -> Chroma + BM25 cache
 ├── config.py              Paths, model names, weights, env-var overrides
+├── auth.py                Accounts, password hashing, demo users
+├── roles.py               Roles, permissions, role-specific suggested questions
+├── styles.py              Visual design (CSS) for the app and sign-in page
 ├── guard.py               Prompt-injection guard
 ├── grounding.py           Answer-grounding check
 ├── audit.py               Redacted JSON-lines audit log
@@ -247,6 +271,9 @@ hr-chatbot/
 ├── requirements.txt
 ├── requirements-gguf.txt  Optional llama.cpp backend for low-memory CPU use
 ├── run.sh / run.bat       One-click start
+├── tests/
+│   ├── test_auth_roles.py Accounts, lockout and permission tests
+│   └── test_app_ui.py     End-to-end sign-in / role / suggestion tests (AppTest)
 ├── docs/
 │   └── TECHNICAL_DOCUMENT.md   Detailed technical explanation
 ├── .streamlit/config.toml Theme and server settings
@@ -255,11 +282,12 @@ hr-chatbot/
     ├── bm25_index.pkl     Cached BM25 index
     ├── uploads/           Documents added through the UI (kept across re-ingests)
     ├── hf_cache/          Downloaded models
+    ├── users.json         User accounts (password hashes)
     ├── audit_log.jsonl    Audit trail
     └── ingest_manifest.json
 ```
 
-## 5. Configuration
+## 6. Configuration
 
 Everything is controlled with environment variables (see `config.py`); the defaults pick the best option automatically.
 
@@ -280,6 +308,7 @@ Everything is controlled with environment variables (see `config.py`); the defau
 | `HR_MIN_OCR_CONFIDENCE` | 0-1 | `0.85` | Below this mean OCR confidence an upload gets a warning |
 | `HR_AUDIT_LOG` / `HR_AUDIT_MAX_BYTES` | `0`/`1` / bytes | `1` / 5 MB | Audit log switch and rotation size |
 | `HR_COMPANY_NAME` / `HR_FALLBACK_CONTACT` | text | `Meridian Labs` / `hr-help@meridianlabs.example` | Organisation name and HR mailbox used in prompts and citations |
+| `HR_DEMO_ACCOUNTS` / `HR_DEMO_PASSWORD` | `0`/`1` / text | `1` / `Welcome@2026` | Create the four demo accounts, and their shared password |
 | `HR_USE_SYSTEM_CERTS` | `0`/`1` | `1` | Trust the OS certificate store (corporate proxies) |
 | `HF_HOME` | folder | `./data/hf_cache` | Where downloaded models are stored |
 | `HR_DATA_PATH` | file or folder | `mock_hr_data.json` | Default source for `ingest.py` |
@@ -288,9 +317,9 @@ Loading order on CUDA: 4-bit NF4 first (about 2.5 GB of VRAM for the 3B model), 
 Without CUDA the default is the 4-bit GGUF model (about 1 GB of RAM). If llama.cpp is not installed the PyTorch CPU backend is used
 (about 6 GB of RAM in float32 for the 1.5B model) and answers are noticeably slower.
 
-## 6. Uploading documents in the UI
+## 7. Uploading documents in the UI
 
-Use **Knowledge base** in the sidebar: choose PDF, DOCX, TXT, Markdown or image (PNG, JPG, WEBP, BMP) files; text in images and scanned PDFs is read with OCR, pick a category (or type a new one) and
+Sign in as an **Administrator** and open **Knowledge base**: choose PDF, DOCX, TXT, Markdown or image (PNG, JPG, WEBP, BMP) files; text in images and scanned PDFs is read with OCR, pick a category (or type a new one) and
 press *Add to knowledge base*. Each file is split into section-aware chunks of at most 400 tokens, embedded into ChromaDB and added to the BM25
 cache immediately, so you can ask about it right away. Answers show an **Uploaded** tag on those sources.
 
@@ -298,7 +327,7 @@ cache immediately, so you can ask about it right away. Answers show an **Uploade
 - Uploaded documents are also saved in `data\uploads\`, so `python ingest.py` keeps them when it rebuilds the index.
 - The upload limit is 25 MB per file (`.streamlit\config.toml`).
 
-## 7. Using your own policy documents
+## 8. Using your own policy documents
 
 `ingest.py` accepts a JSON file or a folder containing PDF, DOCX, TXT, Markdown, image and JSON files:
 
@@ -325,7 +354,7 @@ After ingesting, restart the app (or use "Rerun" in the Streamlit menu) so that 
 shows when the source changed after the last ingestion. Also change `HR_COMPANY_NAME` and `HR_FALLBACK_CONTACT` so the
 assistant uses your organisation's name and HR mailbox.
 
-## 8. Answer quality and safety features
+## 9. Answer quality and safety features
 
 | Feature | What it does | Settings |
 |---|---|---|
@@ -334,9 +363,9 @@ assistant uses your organisation's name and HR mailbox.
 | Answer-grounding check | Compares the answer's numbers and wording with the passages and tags it *Grounded*, *Partly grounded*, *Check figures* or *Not grounded* (`grounding.py`). | thresholds in `grounding.py` |
 | OCR quality warnings | Uploads read by OCR report mean confidence; low confidence, blank pages and empty images produce a warning in the sidebar and in the upload list. | `HR_MIN_OCR_CONFIDENCE` |
 | Prompt-injection guard | Instruction-like text is removed from uploads and retrieved passages, passages are wrapped in `<passage>` tags as data, and override attempts in questions are refused (`guard.py`). | patterns in `guard.py` |
-| Audit log | JSON lines in `data\audit_log.jsonl` for questions, sources, confidence, grounding, uploads and removals. Emails, phone numbers and IDs are masked; the file rotates at 5 MB. Viewable in the sidebar. | `HR_AUDIT_LOG=0` disables, `HR_AUDIT_MAX_BYTES` |
+| Audit log | JSON lines in `data\audit_log.jsonl` for sign-ins, questions (with the user and role), sources, confidence, grounding, uploads, removals and role changes. Emails, phone numbers and IDs are masked; the file rotates at 5 MB. Viewable by administrators under System. | `HR_AUDIT_LOG=0` disables, `HR_AUDIT_MAX_BYTES` |
 
-## 9. General troubleshooting
+## 10. General troubleshooting
 
 - **"ChromaDB collection not found"**: run `python ingest.py`.
 - **CUDA out of memory**: use 4-bit (default), lower `HR_MAX_NEW_TOKENS`, or reduce "Chunks to retrieve" in the sidebar.
@@ -344,7 +373,7 @@ assistant uses your organisation's name and HR mailbox.
 - **Gated model download fails**: Llama needs a Hugging Face token; Qwen does not.
 - **Changed `HR_EMBEDDING_MODEL`**: re-run `python ingest.py`, because vectors from different models are not comparable.
 
-## 10. Disclaimer
+## 11. Disclaimer
 
 The bundled policy data is fictional sample content for demonstration. The chatbot summarises policy text and is not
 a substitute for HR, legal or medical advice.

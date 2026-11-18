@@ -25,6 +25,7 @@ import config  # first: sets HF_HOME and other env vars before the HF libraries 
 import grounding
 import guard
 import ingest
+import roles
 from download_models import ensure_gguf, ensure_model
 
 import torch
@@ -46,6 +47,43 @@ REFUSAL_MESSAGE = (
     f"it reliably. Please contact the HR team at {config.HR_FALLBACK_CONTACT} for help."
 )
 
+_MISSING_SENTENCE = re.compile(
+    r"[^.!?\n]*\b(?:documents?|context|policy|policies|excerpts?|passages?)\b[^.!?\n]*?"
+    r"\b(?:do(?:es)?\s+not|don't|doesn't|did\s+not)\s+(?:mention|cover|contain|include|address)\b([^.!?\n]*)[.!?]?\s*",
+    re.IGNORECASE,
+)
+
+
+def drop_stray_missing_notes(text: str, question: str) -> str:
+    """Remove "The documents do not mention X." sentences whose X never appears in the question.
+
+    A small model sometimes copies example wording instead of answering; real missing topics are kept.
+    """
+    asked = {w.lower() for w in re.findall(r"[A-Za-z0-9]{4,}", question)}
+
+    def check(match: re.Match) -> str:
+        words = {w.lower() for w in re.findall(r"[A-Za-z0-9]{4,}", match.group(1))}
+        return match.group(0) if words & asked else ""
+
+    return _MISSING_SENTENCE.sub(check, text)
+
+
+class _LineFilter:
+    """Streams text line by line so stray sentences can be removed before the user sees them."""
+
+    def __init__(self, question: str) -> None:
+        self.question, self.buffer = question, ""
+
+    def feed(self, fragment: str) -> str:
+        self.buffer += fragment
+        head, sep, self.buffer = self.buffer.rpartition("\n")
+        return drop_stray_missing_notes(head + sep, self.question) if sep else ""
+
+    def flush(self) -> str:
+        rest, self.buffer = self.buffer, ""
+        return drop_stray_missing_notes(rest, self.question)
+
+
 DISCLAIMER = (
     "*Disclaimer: This is a summary of company policy for general guidance only. It is not legal or "
     "medical advice. For your specific situation, please speak with HR, a qualified legal professional "
@@ -57,7 +95,7 @@ SYSTEM_PROMPT = f"""You are the {config.COMPANY_NAME} HR Policy Assistant. You a
 Rules you must follow without exception:
 1. Use only facts that appear in the Policy context. Never use outside knowledge, never guess, and never invent numbers, dates, eligibility rules or names.
 2. Cite the exact policy title and category for every fact, in this format: (Policy: <exact title> | Category: <exact category>). Copy the title and category exactly as written in the context headers.
-3. If the question asks about several things and the context covers only some of them, answer the parts the context covers, then finish with one sentence naming what the documents do not mention, for example: "The documents do not mention LumiX." Never refuse a whole question just because one part is missing. Reply with the refusal sentence only when the context has nothing relevant to ANY part of the question, and then reply exactly: "{REFUSAL_MESSAGE}"
+3. If the question asks about several things and the context covers only some of them, answer the parts the context covers, then finish with one sentence naming the missing part, using only words that appear in the employee question. If every part of the question is covered, do not add any such sentence. Never refuse a whole question just because one part is missing. Reply with the refusal sentence only when the context has nothing relevant to ANY part of the question, and then reply exactly: "{REFUSAL_MESSAGE}"
 4. Be concise and professional. Prefer short paragraphs or bullet points. Include specific amounts, durations and deadlines when the context states them.
 5. If several policies are relevant, cover each one and cite each one separately.
 6. You do not give legal or medical advice. A standard HR disclaimer is appended automatically to sensitive answers, so do not write one yourself.
@@ -562,11 +600,12 @@ class HRRagPipeline:
         self._retrievers.clear()
         self.categories = sorted({d.metadata["category"] for d in docs})
 
-    def add_uploaded_document(self, filename: str, data: bytes, category: str) -> dict:
+    def add_uploaded_document(self, filename: str, data: bytes, category: str, *, role: str | None) -> dict:
         """Chunk an uploaded file, embed it into ChromaDB and refresh the BM25 cache.
 
-        Uploading a file with the same name again replaces the earlier version.
+        Uploading a file with the same name again replaces the earlier version. Admin only.
         """
+        roles.require(role, roles.MANAGE_KB)
         record = ingest.record_from_upload(filename, data, category)
         with self._index_lock:
             if self._splitter is None:
@@ -590,8 +629,9 @@ class HRRagPipeline:
             "ocr_confidence": record.get("ocr_confidence"),
         }
 
-    def remove_uploaded_document(self, document_id: str) -> None:
-        """Delete a previously uploaded document everywhere. Base-corpus policies cannot be removed."""
+    def remove_uploaded_document(self, document_id: str, *, role: str | None) -> None:
+        """Delete a previously uploaded document everywhere. Base-corpus policies cannot be removed. Admin only."""
+        roles.require(role, roles.MANAGE_KB)
         with self._index_lock:
             target = [d for d in self._bm25.docs if d.metadata["document_id"] == document_id]
             if not target or target[0].metadata.get("source") != "upload":
@@ -599,6 +639,18 @@ class HRRagPipeline:
             self._collection.delete(where={"document_id": document_id})
             self._rebuild_bm25([d for d in self._bm25.docs if d.metadata["document_id"] != document_id])
             ingest.delete_upload_record(document_id)
+
+    def category_stats(self) -> list[dict]:
+        """Documents and chunks per category, for the administrator's knowledge-base overview."""
+        grouped: dict[str, dict] = {}
+        for doc in self._bm25.docs:
+            entry = grouped.setdefault(doc.metadata["category"], {"documents": set(), "chunks": 0})
+            entry["documents"].add(doc.metadata["document_id"])
+            entry["chunks"] += 1
+        return [
+            {"Category": name, "Documents": len(entry["documents"]), "Chunks": entry["chunks"]}
+            for name, entry in sorted(grouped.items())
+        ]
 
     def list_uploads(self) -> list[dict]:
         grouped: dict[str, dict] = {}
@@ -825,6 +877,7 @@ class HRRagPipeline:
         started = time.perf_counter()
         for attempt, chain in enumerate((self._answer_chain, self._retry_chain)):
             answer_text, pending, deciding, first, retrying = "", "", True, True, False
+            lines = _LineFilter(question)
             can_retry = attempt == 0 and retrieval.is_strong
             with self._llm_lock:
                 for fragment in chain.stream(payload):
@@ -836,7 +889,8 @@ class HRRagPipeline:
                         logger.info("First token after %.1fs (prompt prefill)", time.perf_counter() - started)
                     answer_text += fragment
                     if not deciding:
-                        yield fragment
+                        if out := lines.feed(fragment):
+                            yield out
                         continue
                     # Hold back the first few characters: if they are the refusal sentence although a passage
                     # clearly matches, discard it and answer again with the no-refusal prompt.
@@ -847,7 +901,8 @@ class HRRagPipeline:
                     if pending.startswith(prefix) and can_retry:
                         retrying = True
                         break
-                    yield pending
+                    if out := lines.feed(pending):
+                        yield out
                     pending = ""
             if retrying or (first and can_retry):
                 logger.info("The model refused although a passage matches; retrying without the refusal option")
@@ -855,7 +910,10 @@ class HRRagPipeline:
             if deciding and pending:  # a very short answer
                 if pending.startswith(prefix) and can_retry:
                     continue
-                yield pending
+                if out := lines.feed(pending):
+                    yield out
+            if tail := lines.flush():
+                yield tail
             break
         logger.info("Generation finished in %.1fs", time.perf_counter() - started)
         if not answer_text.strip():  # the model produced nothing usable
