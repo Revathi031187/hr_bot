@@ -143,6 +143,14 @@ Uploads made through the UI are re-read from `data/uploads` and survive a rebuil
    meaningful remains. Otherwise an unknown product name drags retrieval off-topic and makes a small model refuse the whole
    question. The missing names are reported at the end of the answer: *Not found in the documents: LumiX.*
 
+4. **Follow-up questions** (`suggest_followups`, `clean_followups`): after each real answer the model is asked once for three deeper
+   next questions (eligibility, steps, deadlines, exceptions, related policy), given the question, the answer and the top two
+   passages. Each line is kept only if it is a question of 12 to 150 characters, shares at least 40% of its content words with
+   the retrieved passages (so it can be answered from them), and is not a near repeat (Jaccard 0.7) of an earlier question. If
+   fewer than three survive, templated questions about the cited policy fill the gap. Refusals, blocked prompts and small talk
+   get none. The UI shows them as buttons under the latest answer only; choosing one asks it, and typing a different question
+   works as usual. The extra call adds a few seconds on CPU.
+
 ### 4.2 Hybrid candidate generation
 
 An `EnsembleRetriever` (LangChain) combines:
@@ -366,6 +374,8 @@ Unneeded formats (`.onnx`, `.h5`, `.msgpack`, ...) and duplicate `.bin` weights 
 ## 11. User interface (`app.py`)
 
 - **Sign-in page** (`render_login`): a full-screen two-column layout, a plain brand panel on the left and the form on the right, switched between *Sign in* and *Create account* with `auth_mode`. Registering does not start a session: it returns to *Sign in* with the email pre-filled and a confirmation, so the new user signs in once. Four compact demo buttons sit under the form. The sidebar is hidden until sign-in.
+- **Theme toggle**: a sun/moon button beside the account menu (also on the sign-in page) switches between light and dark for every view. The choice is kept in `st.session_state.theme` and survives sign-out; dark mode is a second token set (`DARK_CSS`) injected after the base CSS, because Streamlit cannot change its own theme at runtime.
+- **Category scope**: with *All categories* the empty chat shows the role's suggested questions. Choosing one category replaces them with a welcome panel naming the category and listing its documents (`category_titles`), so the user knows what to ask.
 - **Account menu** (everyone): a collapsible button fixed at the top right (`render_profile_menu`, a `st.popover`) that opens the profile card (avatar initials, name, title, role badge) and *Sign out*.
 - **Sidebar** (everyone): brand, category filter, passages per answer (`top_k`), clear history, HR contact. Administrators also get the *Navigate* list.
 - **Administrator views**, chosen with a *Navigate* radio list in the sidebar (the search settings show only on *Assistant*): *Assistant*; *Knowledge base* (documents, vector and keyword chunk counts, categories, per-category coverage table, upload form, uploaded-document list with removal, index consistency and staleness warnings); *System* (live component status, pipeline reference, audit log with user and role columns and a download button); *Users* (role counts, account table, change-role form). Only one view is rendered per run, so the chat input exists only on the Assistant view.

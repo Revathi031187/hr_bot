@@ -16,7 +16,7 @@ import grounding
 import roles
 from ingest import UPLOAD_TYPES
 from rag_pipeline import HRRagPipeline, IndexNotFoundError, confidence_label
-from styles import CSS, LOGIN_CSS
+from styles import CSS, DARK_CSS, LOGIN_CSS
 
 config.setup_logging()
 log = logging.getLogger("hr_chatbot.app")
@@ -46,6 +46,7 @@ def init_state() -> None:
     st.session_state.setdefault("user", None)
     st.session_state.setdefault("login_error", "")
     st.session_state.setdefault("admin_view", ADMIN_VIEWS[0])
+    st.session_state.setdefault("theme", "light")
 
 
 def queue_prompt(prompt: str) -> None:
@@ -121,6 +122,8 @@ def set_auth_mode(mode: str) -> None:
 
 def render_login() -> None:
     st.markdown(LOGIN_CSS, unsafe_allow_html=True)
+    with st.container(key="top_actions", horizontal=True):
+        theme_button()
     auth.ensure_demo_users()
     mode = st.session_state.get("auth_mode", "signin")
     left, right = st.columns(2, gap="small")
@@ -333,15 +336,14 @@ def render_knowledge_base(pipeline: HRRagPipeline, user: dict) -> None:
     with right:
         st.markdown('<div class="panel-title">Coverage by category</div>', unsafe_allow_html=True)
         st.markdown('<div class="panel-sub">Documents and chunks currently indexed.</div>', unsafe_allow_html=True)
-        st.dataframe(
-            pipeline.category_stats(),
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "Category": st.column_config.TextColumn(width="medium"),
-                "Documents": st.column_config.NumberColumn(width="small"),
-                "Chunks": st.column_config.NumberColumn(width="small"),
-            },
+        rows = "".join(
+            f'<tr><td>{html.escape(r["Category"])}</td><td class="num">{r["Documents"]}</td><td class="num">{r["Chunks"]}</td></tr>'
+            for r in pipeline.category_stats()
+        )
+        st.markdown(
+            '<table class="coverage"><thead><tr><th>Category</th><th class="num">Docs</th><th class="num">Chunks</th></tr></thead>'
+            f"<tbody>{rows}</tbody></table>",
+            unsafe_allow_html=True,
         )
 
     st.markdown('<div class="panel-title">Uploaded documents</div>', unsafe_allow_html=True)
@@ -491,9 +493,22 @@ def render_audit_log() -> None:
             )
 
 
+def toggle_theme() -> None:
+    st.session_state.theme = "light" if st.session_state.get("theme") == "dark" else "dark"
+
+
+def theme_button() -> None:
+    dark = st.session_state.get("theme") == "dark"
+    st.button(
+        "", key="theme_toggle", on_click=toggle_theme, icon=":material/light_mode:" if dark else ":material/dark_mode:",
+        help="Switch to light theme" if dark else "Switch to dark theme",
+    )
+
+
 def render_profile_menu(user: dict) -> None:
     """Collapsible account menu fixed to the top-right corner of the page."""
-    with st.container(key="profile_menu"):
+    with st.container(key="top_actions", horizontal=True):
+        theme_button()
         with st.popover(user["name"], icon=":material/account_circle:"):
             st.markdown(
                 f'<div class="profile"><div class="avatar {html.escape(user["role"])}">{html.escape(initials(user["name"]))}</div>'
@@ -623,17 +638,43 @@ def render_header(category: str | None, view: str = "Assistant") -> None:
     )
 
 
-def render_history() -> None:
-    for message in st.session_state.messages:
+def render_followups(followups: list[str], index: int) -> None:
+    """Clickable next questions under the latest answer; choosing one asks it, or the user can type something else."""
+    if not followups:
+        return
+    st.markdown('<div class="starter-label">Continue the conversation</div>', unsafe_allow_html=True)
+    with st.container(key=f"followups_{index}"):
+        for position, question in enumerate(followups):
+            st.button(question, key=f"followup_{index}_{position}", on_click=queue_prompt, args=(question,), width="stretch")
+
+
+def render_history(show_followups: bool = True) -> None:
+    messages = st.session_state.messages
+    for index, message in enumerate(messages):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             if message["role"] == "assistant":
                 render_sources(message)
+                if show_followups and index == len(messages) - 1:
+                    render_followups(message.get("followups", []), index)
 
 
-def render_empty_state(pipeline: HRRagPipeline, user: dict) -> None:
+def render_empty_state(pipeline: HRRagPipeline, user: dict, category: str | None = None) -> None:
     role = roles.get_role(user["role"])
     first_name = user["name"].split()[0]
+    if category:
+        titles = pipeline.category_titles(category)
+        chips = "".join(f'<span class="topic-chip">{html.escape(t)}</span>' for t in titles)
+        st.markdown(
+            f'<div class="welcome"><div class="hello"><h3>{html.escape(category)}</h3>{role_badge(role.key)}</div>'
+            f"<p>Hi {html.escape(first_name)}, I am now answering only from the <b>{html.escape(category)}</b> policies. "
+            "Ask about anything these documents cover, for example eligibility, steps, deadlines and amounts. "
+            "Choose <b>All categories</b> in the sidebar to search every policy and see suggested questions.</p>"
+            + (f'<div class="topic-label">Documents in this category</div><div class="topic-chips">{chips}</div>' if chips else "")
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+        return
     n_categories = len(pipeline.categories)
     st.markdown(
         f'<div class="welcome"><div class="hello"><h3>Hello, {html.escape(first_name)}. How can I help?</h3>{role_badge(role.key)}</div>'
@@ -688,6 +729,11 @@ def answer_question(pipeline: HRRagPipeline, prompt: str, category: str | None, 
             "generation_latency": generation_latency,
         }
         render_sources(message)
+        if not (retrieval.blocked or retrieval.smalltalk or retrieval.declined):
+            asked = [m["content"] for m in st.session_state.messages if m["role"] == "user"][:-1]
+            with st.spinner("Thinking of what you might ask next..."):
+                message["followups"] = pipeline.suggest_followups(prompt, answer.replace("\\$", "$"), retrieval, asked)
+            render_followups(message["followups"], len(st.session_state.messages))
     st.session_state.messages.append(message)
 
 
@@ -697,11 +743,10 @@ def render_assistant(pipeline: HRRagPipeline, user: dict, category: str | None, 
     pending = st.session_state.pending_prompt
     st.session_state.pending_prompt = None
 
-    render_history()
-    if not st.session_state.messages and not pending:
-        render_empty_state(pipeline, user)
-
     prompt = st.chat_input("Ask an HR policy question...") or pending
+    render_history(show_followups=not prompt)
+    if not st.session_state.messages and not prompt:
+        render_empty_state(pipeline, user, category)
     if prompt:
         answer_question(pipeline, prompt, category, top_k, user)
 
@@ -710,6 +755,8 @@ def render_assistant(pipeline: HRRagPipeline, user: dict, category: str | None, 
 def main() -> None:
     init_state()
     st.markdown(CSS, unsafe_allow_html=True)
+    if st.session_state.theme == "dark":
+        st.markdown(DARK_CSS, unsafe_allow_html=True)
 
     user = resolve_user()
     if user is None:

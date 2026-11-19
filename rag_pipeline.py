@@ -137,6 +137,24 @@ CONDENSE_PROMPT = ChatPromptTemplate.from_messages(
     ]
 )
 
+FOLLOWUP_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You suggest next questions for an HR policy assistant. Given the employee's question, the assistant's answer "
+            "and the policy excerpts, write exactly 3 short follow-up questions the employee is likely to ask next. "
+            "Each one must be answerable from the excerpts and go one step deeper: eligibility, steps, deadlines, "
+            "exceptions, amounts or a related policy. Do not repeat a question already asked. Write in the employee's "
+            "voice (I, my). Output one question per line, with no numbering and no other text.",
+        ),
+        (
+            "human",
+            "Questions already asked:\n{asked}\n\nEmployee question: {question}\n\nAssistant answer: {answer}\n\n"
+            "Policy excerpts:\n{context}\n\nThree follow-up questions:",
+        ),
+    ]
+)
+
 _SENSITIVE_PATTERN = re.compile(
     r"\b(legal|law|laws|lawsuit|sue|suing|attorney|lawyer|discriminat\w*|harass\w*|retaliat\w*|wrongful\w*|"
     r"terminat\w*|fired|dismiss\w*|severance|immigration|visa|fmla|ada|eeoc|workers'? comp\w*|"
@@ -248,6 +266,31 @@ def confidence_label(score: float) -> str:
     return "Low"
 
 
+def _content_words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]{4,}", text.lower()) if w not in _TOPIC_STOP}
+
+
+def clean_followups(raw: str, asked: Sequence[str], context: str, limit: int = 3) -> list[str]:
+    """Keep only usable follow-ups from a small model's output: real questions, not repeats, and about the passages."""
+    haystack = context.lower()
+    seen = [_content_words(q) for q in asked]
+    kept: list[str] = []
+    for line in raw.splitlines():
+        text = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip(" \"'*")
+        if not text.endswith("?") or not 12 <= len(text) <= 150 or text in kept:
+            continue
+        words = _content_words(text)
+        if not words or sum(1 for w in words if w in haystack) / len(words) < 0.4:
+            continue  # not about anything in the retrieved policy text
+        if any(words and len(words & old) / len(words | old) >= 0.7 for old in seen if old):
+            continue  # a repeat of something already asked
+        kept.append(text)
+        seen.append(words)
+        if len(kept) == limit:
+            break
+    return kept
+
+
 def is_relevant_source(source: dict) -> bool:
     """A passage counts as relevant on strong meaning similarity, or on a moderate one backed by exact-word
     matches or the cross-encoder. A short query such as a section name scores a little low on meaning alone."""
@@ -348,6 +391,7 @@ class HRRagPipeline:
         self._answer_chain = None
         self._retry_chain = None
         self._condense_chain = None
+        self._followup_chain = None
         self._vocab: set[str] | None = None
         self._reranker = None
         self._reranker_failed = not config.RERANKER_ENABLED
@@ -504,6 +548,8 @@ class HRRagPipeline:
         self._answer_chain = ANSWER_PROMPT | RunnableLambda(self._to_chat_text) | generate | parse
         self._retry_chain = RETRY_PROMPT | RunnableLambda(self._to_chat_text) | generate | parse
         self._condense_chain = CONDENSE_PROMPT | RunnableLambda(self._to_chat_text) | short_generate | parse
+        followup_generate = RunnableLambda(lambda text: "".join(self._generate_stream(text, max_new_tokens=100)))
+        self._followup_chain = FOLLOWUP_PROMPT | RunnableLambda(self._to_chat_text) | followup_generate | parse
 
     def _load_model(self, model_path: str):
         """Try 4-bit NF4 -> float16 on CUDA, otherwise a CPU dtype. Returns (model, description)."""
@@ -932,6 +978,49 @@ class HRRagPipeline:
             yield f"\n\n{reference}"
         if sensitive:
             yield f"\n\n{DISCLAIMER}"
+
+    def category_titles(self, category: str) -> list[str]:
+        """Titles of the indexed policy documents in one category, in alphabetical order."""
+        return sorted({d.metadata["title"] for d in self._bm25.docs if d.metadata["category"] == category})
+
+    def suggest_followups(self, question: str, answer: str, retrieval: RetrievalResult, asked: Sequence[str] = ()) -> list[str]:
+        """Up to three deeper follow-up questions for the answer just given.
+
+        The model writes them; each is checked against the retrieved passages and the earlier questions, and
+        templated questions about the cited policy fill any gap, so the employee never gets an empty or off-topic list.
+        """
+        relevant = [src for src in retrieval.sources if is_relevant_source(src)][:3]
+        if not relevant:
+            return []
+        context = "\n\n".join(f"{src['title']}: {src['content'][:350]}" for src in relevant[:2])
+        full_text = " ".join(f"{src['title']} {src['category']} {src['content']}" for src in relevant)
+        suggestions: list[str] = []
+        try:
+            self.ensure_llm()
+            with self._llm_lock:
+                raw = self._followup_chain.invoke(
+                    {
+                        "asked": "\n".join(f"- {q}" for q in [*asked][-6:] + [question]),
+                        "question": question,
+                        "answer": answer[:700],
+                        "context": context,
+                    }
+                )
+            suggestions = clean_followups(raw, [*asked, question], full_text)
+        except Exception:  # follow-ups are a convenience: never let them break an answer
+            logger.exception("Follow-up generation failed")
+        top = relevant[0]
+        fillers = [
+            f"What are the eligibility requirements in the {top['title']}?",
+            f"What steps do I need to follow under the {top['title']}?",
+            f"Which other policies relate to {top['category']}?",
+        ]
+        for filler in fillers:
+            if len(suggestions) >= 3:
+                break
+            if filler not in suggestions and filler not in asked and filler != question:
+                suggestions.append(filler)
+        return suggestions[:3]
 
     @staticmethod
     def _policy_reference(retrieval: RetrievalResult) -> str:

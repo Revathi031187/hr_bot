@@ -148,6 +148,51 @@ check_no_exception(at, "first login")
 assert at.session_state["user"]["role"] == "employee" and at.session_state["user"]["name"] == "Nina Shah"
 print("8 sign up then sign in ok")
 
+# ---- 9. light/dark toggle works on the login page and every admin view
+[b for b in at.button if b.key == "sign_out"][0].click().run()
+assert at.session_state["theme"] == "light" and "color-scheme: dark" not in texts(at)
+[b for b in at.button if b.key == "theme_toggle"][0].click().run()
+check_no_exception(at, "dark on login")
+assert at.session_state["theme"] == "dark" and "color-scheme: dark" in texts(at)
+demo(at, "priya.raman").click().run()
+for view in ("Assistant", "Knowledge base", "System", "Users"):
+    at.session_state["admin_view"] = view
+    at.run()
+    check_no_exception(at, "dark " + view)
+    assert "color-scheme: dark" in texts(at), view
+[b for b in at.button if b.key == "theme_toggle"][0].click().run()
+[b for b in at.button if b.key == "sign_out"][0].click().run()
+assert at.session_state["theme"] == "light" and "color-scheme: dark" not in texts(at)
+print("9 theme toggle ok")
+
+# ---- 10. a chosen category replaces the suggestions with a category welcome; follow-ups are validated
+demo(at, "arjun.kapoor").click().run()
+assert starter_topics(at), "All categories shows the suggested questions"
+cat_box = [s_ for s_ in at.sidebar.selectbox if s_.label == "Category"][0]
+chosen = [o for o in cat_box.options if o != "All categories"][0]
+cat_box.set_value(chosen).run()
+check_no_exception(at, "category welcome")
+assert not starter_topics(at), "no suggestions when a category is chosen"
+import html as _h
+assert _h.escape(chosen) in texts(at) and "Documents in this category" in texts(at), texts(at)[-600:]
+cat_box = [s_ for s_ in at.sidebar.selectbox if s_.label == "Category"][0]
+cat_box.set_value("All categories").run()
+assert starter_topics(at)
+print("10 category welcome ok:", chosen)
+
+import rag_pipeline as rp
+ctx = "Parental leave: eligible employees get 16 weeks of paid leave. 30 days notice is required. Leave can be taken in blocks."
+raw = chr(10).join([
+    "1. How much notice must I give for parental leave?",
+    "- Can I take parental leave in blocks?",
+    "What is the capital of France?",
+    "What is the parental leave duration?",
+    "How do I apply",
+])
+got = rp.clean_followups(raw, ["What is the parental leave duration?"], ctx)
+assert got == ["How much notice must I give for parental leave?", "Can I take parental leave in blocks?"], got
+print("11 follow-up validation ok")
+
 ev = [e["event"] + ":" + e.get("role", "") for e in audit.read_recent(50)][::-1]
 print("audit events:", ev)
 print("ALL UI TESTS PASSED")
